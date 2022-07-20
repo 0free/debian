@@ -1,0 +1,170 @@
+#!/bin/bash
+
+clear && set -e
+
+drive='/dev/sdc'
+
+user=$(whoami)
+
+if [ ! -f ~/debian.iso ]; then
+
+   sudo apt -y update
+   sudo apt -y full-upgrade
+   sudo apt -y install live-build
+
+   cd ~
+
+   if [ -d ./iso-build/ ]; then
+      sudo rm -r ./iso-build
+   fi
+
+   mkdir ./iso-build
+
+   cd ./iso-build
+
+   lb config -d sid --archive-areas "main contrib non-free" --debootstrap-options --variant=minbase
+
+   cat << EOF > ./config/package-lists/pkgs.list.chroot
+
+   amd64-microcode intel-microcode
+
+   apt-utils
+
+   efibootmgr grub-efi-amd64 os-prober systemd-boot-efi
+   mtools lvm2 udisks2 udisks2-lvm2 udisks2-btrfs btrfs-progs
+   fdisk gdisk util-linux
+   dosfstools exfatprogs ntfs-3g
+   e2fsprogs xfsprogs f2fs-tools jfsutils udftools mmc-utils
+   zfs-dkms zfsutils-linux zfs-initramfs
+
+   gufw iptables
+
+   firmware-linux firmware-iwlwifi firmware-realtek firmware-amd-graphics firmware-sof-signed bluez-firmware
+
+   iwd wpasupplicant
+
+   build-essential sudo fakeroot bash bash-completion curl wget nano
+
+   xwayland weston wayland-protocols xserver-xorg
+
+   gdm3 libpam-gnome-keyring xdg-desktop-portal-gnome gvfs-fuse
+   gnome-session-bin gnome-shell gnome-shell-extensions gnome-tweaks gnome-control-center chrome-gnome-shell
+   gnome-settings-daemon-common gsettings-desktop-schemas
+   nautilus gnome-terminal gnome-system-monitor gnome-disk-utility gnome-firmware gnome-bluetooth
+   gedit gedit-common gedit-plugin-bookmarks gedit-plugin-bracket-completion gedit-plugin-color-picker gedit-plugin-color-schemer gedit-plugin-smart-spaces gedit-plugin-translate gedit-plugin-word-completion
+
+   network-manager network-manager-gnome
+
+   alsa-utils bluez-alsa-utils alsa-tools-gui alsa-ucm-conf alsa-firmware-loaders
+
+   pipewire-bin pipewire-alsa pipewire-pulse wireplumber easyeffects
+
+   system-config-printer-udev system-config-printer-common
+
+   mesa-vulkan-drivers mesa-va-drivers mesa-vdpau-drivers xserver-xorg-video-amdgpu nvidia-modprobe
+
+   chromium-shell
+
+EOF
+
+   if [ ! -d ./config/include.chroot_after_packages/etc/skel/ ]; then
+      mkdir -p ./config/include.chroot_after_packages/etc/skel/
+   fi
+
+   sudo lb build
+
+   mv ~/iso-build/live-image-amd64.hybrid.iso ~/debian.iso
+
+   sudo chown $user:$user ~/debian.iso
+   sudo chmod 755 ~/debian.iso
+
+fi
+
+if mountpoint -q ~/drive-mnt; then
+   sudo umount -l ~/drive-mnt
+fi
+
+for d in $(ls -a "$drive"*); do
+   if findmnt --source $d >/dev/null; then
+      sudo umount -l $d
+   fi
+done
+
+if ! test sgdisk; then
+   sudo apt -y install gdisk
+fi
+
+sudo partprobe $drive
+
+sudo wipefs -a $drive
+
+sudo sgdisk -goU $drive
+
+sudo sgdisk -g -n 1:0:+1600M -c 1:BOOT -t 1:ef00 $drive
+
+sudo sgdisk -g -n 2:0:0 -c 2:ROOT -t 2:8300 $drive
+
+sleep 1
+
+iso_drive="$drive"1
+root_drive="$drive"2
+
+sudo mkfs.fat -F32 -n BOOT $iso_drive
+
+echo -e '' | sudo mkfs.ext4 -O ^has_journal -L persistance $root_drive
+
+if [ ! -d ~/drive-mnt ]; then
+   mkdir ~/drive-mnt
+fi
+
+if [ ! -d ~/iso-mnt ]; then
+   mkdir ~/iso-mnt
+fi
+
+sudo mount $iso_drive ~/drive-mnt
+sudo mount -o loop ~/debian.iso ~/iso-mnt
+
+if mountpoint -q ~/iso-mnt; then
+   if mountpoint -q ~/drive-mnt; then
+      echo '>>> copying iso content to drive'
+      sudo cp -r ~/iso-mnt/* ~/drive-mnt/
+      sudo umount ~/iso-mnt
+      sudo rm -r ~/iso-mnt
+   fi
+else
+   exit 0
+fi
+
+sudo mv ~/drive-mnt/isolinux ~/drive-mnt/syslinux
+
+cd ~/drive-mnt
+
+for f in $(grep -FRil "splash quiet"); do
+   echo $f
+   LANG=C sed -i 's/splash quiet/persistence /;s/quiet splash/persistence /' $f
+done
+
+cd ~/drive-mnt/syslinux
+
+if ! test rename; then
+   sudo apt -y install rename
+fi
+
+sudo rename "s/iso/sys/" iso*
+
+cd ~ && sync
+
+sudo umount ~/drive-mnt/
+
+sudo mount $root_drive ~/drive-mnt
+
+sudo touch ~/drive-mnt/persistence.conf
+sudo chmod 666 ~/drive-mnt/persistence.conf
+sudo echo "/ union" > ~/drive-mnt/persistence.conf
+
+cd ~/drive-mnt/ && sync && cd ~
+
+sudo umount ~/drive-mnt/
+sudo rm -r ~/drive-mnt
+
+#end
